@@ -80,6 +80,62 @@ class ImeSyncDeferringInsetsCallback {
     this.insetsListener = new InsetsListener();
   }
 
+  private int getNavigationBarInsetsToExclude(@NonNull WindowInsets windowInsets) {
+    if (view == null) {
+      return 0;
+    }
+    int systemUiFlags = view.getWindowSystemUiVisibility();
+    boolean shouldExcludeNavigationBarInsets =
+        (systemUiFlags & View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION) == 0
+            && (systemUiFlags & View.SYSTEM_UI_FLAG_HIDE_NAVIGATION) == 0;
+
+    View rootView = view.getRootView();
+    if (rootView != null) {
+      if (rootView.getFitsSystemWindows()) {
+        shouldExcludeNavigationBarInsets = true;
+      } else {
+        boolean rootReservesNavigationBarSpace = rootView.getPaddingBottom() > 0;
+        if (!rootReservesNavigationBarSpace) {
+          int rootHeight = rootView.getHeight();
+          int viewHeight = view.getHeight();
+          if (rootHeight > 0 && viewHeight > 0 && rootHeight > viewHeight) {
+            rootReservesNavigationBarSpace = true;
+          }
+        }
+        if (!rootReservesNavigationBarSpace) {
+          shouldExcludeNavigationBarInsets = false;
+        } else {
+          shouldExcludeNavigationBarInsets = true;
+        }
+      }
+    }
+
+    if (shouldExcludeNavigationBarInsets) {
+      return windowInsets.getInsets(WindowInsets.Type.navigationBars()).bottom;
+    }
+    return 0;
+  }
+
+  private WindowInsets adjustImeInsets(@NonNull WindowInsets windowInsets) {
+    int excludedInsets = getNavigationBarInsetsToExclude(windowInsets);
+    if (excludedInsets == 0) {
+      return windowInsets;
+    }
+    Insets imeInsets = windowInsets.getInsets(deferredInsetTypes);
+    if (imeInsets.bottom <= 0) {
+      return windowInsets;
+    }
+    int newImeBottom = Math.max(imeInsets.bottom - excludedInsets, 0);
+    if (newImeBottom == imeInsets.bottom) {
+      return windowInsets;
+    }
+    WindowInsets.Builder builder = new WindowInsets.Builder(windowInsets);
+    builder.setInsets(
+        deferredInsetTypes,
+        Insets.of(imeInsets.left, imeInsets.top, imeInsets.right, newImeBottom));
+    return builder.build();
+  }
+
   // Add this object's event listeners to its view.
   void install() {
     view.setWindowInsetsAnimationCallback(animationCallback);
@@ -148,19 +204,22 @@ class ImeSyncDeferringInsetsCallback {
 
       // The IME insets include the height of the navigation bar. If the app isn't laid out behind
       // the navigation bar, this causes the IME insets to be too large during the animation.
-      // To fix this, we subtract the navigationBars bottom inset if the system UI flags for laying
-      // out behind the navigation bar aren't present.
-      int excludedInsets = 0;
-      int systemUiFlags = view.getWindowSystemUiVisibility();
-      if ((systemUiFlags & View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION) == 0
-          && (systemUiFlags & View.SYSTEM_UI_FLAG_HIDE_NAVIGATION) == 0) {
-        excludedInsets = insets.getInsets(WindowInsets.Type.navigationBars()).bottom;
-      }
+      // To fix this, we subtract the navigationBars bottom inset when the view hierarchy is not
+      // laid out behind it. Historically this was detected via the deprecated system UI flags, but
+      // on newer Android versions these flags may remain unset even when the content extends behind
+      // the navigation bar (e.g. Android 15's default edge-to-edge mode). Therefore, we additionally
+      // check whether the root view is reserving space for the navigation bar via padding or a
+      // reduced child height.
+      int excludedInsets = getNavigationBarInsetsToExclude(insets);
 
       WindowInsets.Builder builder = new WindowInsets.Builder(lastWindowInsets);
+      Insets imeInsets = insets.getInsets(deferredInsetTypes);
       Insets newImeInsets =
           Insets.of(
-              0, 0, 0, Math.max(insets.getInsets(deferredInsetTypes).bottom - excludedInsets, 0));
+              imeInsets.left,
+              imeInsets.top,
+              imeInsets.right,
+              Math.max(imeInsets.bottom - excludedInsets, 0));
       builder.setInsets(deferredInsetTypes, newImeInsets);
 
       // Directly call onApplyWindowInsets of the view as we do not want to pass through
@@ -203,7 +262,7 @@ class ImeSyncDeferringInsetsCallback {
         // is not part of the animation and instead, represents the final state
         // of the inset after the animation is completed. Thus, we defer the processing
         // of this WindowInset until the animation completes.
-        lastWindowInsets = windowInsets;
+        lastWindowInsets = adjustImeInsets(windowInsets);
         needsSave = false;
       }
       if (animating) {
